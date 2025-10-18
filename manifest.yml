@@ -1,0 +1,28 @@
+modules:
+  jira:dashboardGadget:
+    - key: graphical-charts-gadget-dashboard-gadget-ui-kit-2-hello-world-gadget
+      title: graphical-charts-gadget
+      description: A hello world dashboard gadget.
+      thumbnail: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+      resource: main-resource
+      render: native
+      resolver:
+        function: resolver
+      edit:
+        resource: main-resource
+        render: native
+  function:
+    - key: resolver
+      handler: index.handler
+resources:
+  - key: main-resource
+    path: src/frontend/index.jsx
+app:
+  runtime:
+    name: nodejs22.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/83851edf-10d0-4e8a-99b0-6c44f80318f7
+permissions:
+  scopes:
+    - read:jira-work
