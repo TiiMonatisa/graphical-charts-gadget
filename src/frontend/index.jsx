@@ -4,8 +4,10 @@ import ForgeReconciler, {
     Select,
     useProductContext,
     Textfield,
+    TextArea,
     Form,
     Button,
+    LoadingButton,
     FormSection,
     FormFooter,
     Label,
@@ -18,12 +20,15 @@ import ForgeReconciler, {
     HorizontalStackBarChart,
     LineChart,
     PieChart,
-    SectionMessage
+    SectionMessage,
+    DynamicTable
 } from "@forge/react";
 import {invoke, view, requestJira} from "@forge/bridge";
 
 const GRAPH_NAME = "graph-name";
 const GRAPH_JQL = "graph-jql";
+// Optional: allow multiple JQLs for comparison mode (one per line as Label: JQL)
+const GRAPH_MULTI_JQL = "graph-multi-jql";
 const GRAPH_TYPE = "graph-type";
 const GRAPH_GROUP = "graph-group";
 const GRAPH_AGG = "graph-agg";
@@ -57,6 +62,17 @@ export const Edit = () => {
     const toLabel = (v) => (v && typeof v === 'object') ? (v.label || v.value || '') : (v || '');
     const currentGroupValue = toId(cfg[GRAPH_GROUP]);
     const currentStackValue = toId(cfg[GRAPH_STACK]);
+
+    // Local state for JQL inputs so we can validate inline without saving yet
+    const [jqlInput, setJqlInput] = useState(cfg[GRAPH_JQL] || "");
+    const [multiInput, setMultiInput] = useState(cfg[GRAPH_MULTI_JQL] || "");
+
+    // Validation state
+    const [validating, setValidating] = useState(false);
+    const [validationMode, setValidationMode] = useState(null); // 'single' | 'multi' | null
+    const [validationResults, setValidationResults] = useState(null); // array of {label, jql, total}
+    const [validationTotal, setValidationTotal] = useState(null); // number | null
+    const [validationError, setValidationError] = useState(null);
 
     const [groupQuery, setGroupQuery] = useState("");
     const [stackQuery, setStackQuery] = useState("");
@@ -150,9 +166,122 @@ export const Edit = () => {
         return () => { alive = false; clearTimeout(handle); };
     }, [stackQuery, currentStackValue]);
 
+    // Helper: parse Multi JQL textarea into structured items
+    const parseMulti = (raw) => {
+        if (!raw) return [];
+        return String(raw)
+            .split(/\r?\n/)
+            .map(l => l.trim())
+            .filter(l => l.length > 0)
+            .map(line => {
+                // Support both ":" and "=" as separators
+                const m = line.match(/^(.*?)[=:](.*)$/);
+                if (!m) return { label: (line.slice(0, 24).trim() || 'Series'), jql: line };
+                return { label: m[1].trim() || 'Series', jql: m[2].trim() };
+            });
+    };
+
+    // Count issues for a JQL by paging using nextPageToken/isLast when present;
+    // fallback to single page with 'total' when available.
+    const countIssuesPaged = async (q) => {
+        const MAX_RESULTS = 1000; // 1..5000 allowed; choose 1000 to balance payload
+        const MAX_PAGES = 100;    // safety cap (~100k issues)
+        let totalCount = 0;
+        let nextToken = null;
+        for (let page = 0; page < MAX_PAGES; page++) {
+            const params = new URLSearchParams();
+            params.set('jql', q);
+            params.set('maxResults', String(MAX_RESULTS));
+            params.set('fields', 'key');
+            if (nextToken) params.set('nextPageToken', nextToken);
+            const url = `/rest/api/3/search/jql?${params.toString()}`;
+            const resp = await requestJira(url);
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`Jira search failed (${resp.status}): ${text}`);
+            }
+            const json = await resp.json();
+            const issues = Array.isArray(json.issues) ? json.issues : [];
+            totalCount += issues.length;
+            const hasTokenPaging = Object.prototype.hasOwnProperty.call(json, 'isLast') || Object.prototype.hasOwnProperty.call(json, 'nextPageToken');
+            if (hasTokenPaging) {
+                if (json.isLast === true) break;
+                nextToken = json.nextPageToken;
+                if (!nextToken) break;
+            } else if (typeof json.total === 'number') {
+                // Old-style response exposes total; trust it and stop.
+                totalCount = json.total;
+                break;
+            } else {
+                // No way to continue deterministically; stop here.
+                break;
+            }
+        }
+        return totalCount;
+    };
+
+    // Validate a single JQL by paging to compute the total count
+    const validateSingle = async () => {
+        setValidationError(null);
+        setValidationResults(null);
+        setValidationTotal(null);
+        setValidationMode('single');
+        const q = (jqlInput || '').trim();
+        if (!q) {
+            setValidationError('Enter a JQL to validate.');
+            return;
+        }
+        setValidating(true);
+        try {
+            const total = await countIssuesPaged(q);
+            setValidationResults([{ label: 'Query', jql: q, total }]);
+            setValidationTotal(total);
+        } catch (e) {
+            setValidationError(e.message || String(e));
+        } finally {
+            setValidating(false);
+        }
+    };
+
+    // Validate multiple JQLs (one per line) and compute totals per line plus overall
+    const validateMulti = async () => {
+        setValidationError(null);
+        setValidationResults(null);
+        setValidationTotal(null);
+        setValidationMode('multi');
+        const items = parseMulti(multiInput);
+        if (items.length === 0) {
+            setValidationError('Enter one or more lines using "Label: JQL".');
+            return;
+        }
+        setValidating(true);
+        try {
+            const results = await Promise.all(items.map(async (it) => {
+                try {
+                    const total = await countIssuesPaged(it.jql);
+                    return { ...it, total };
+                } catch (err) {
+                    return { ...it, error: String(err?.message || err), total: null };
+                }
+            }));
+            const sum = results.reduce((acc, r) => acc + (typeof r.total === 'number' ? r.total : 0), 0);
+            setValidationResults(results);
+            setValidationTotal(sum);
+        } catch (e) {
+            setValidationError(e.message || String(e));
+        } finally {
+            setValidating(false);
+        }
+    };
+
     const configureGadget = async (data) => {
-        console.log(data);
-        view.submit(data);
+        // Inject our controlled fields so they are saved even though we don't use register for them
+        const payload = {
+            ...data,
+            [GRAPH_JQL]: jqlInput,
+            [GRAPH_MULTI_JQL]: multiInput,
+        };
+        view.submit(payload);
     };
 
     return (
@@ -168,9 +297,68 @@ export const Edit = () => {
             <FormSection>
                 <Label labelFor={getFieldId(GRAPH_JQL)}>
                     JQL
-                    <RequiredAsterisk/>
                 </Label>
-                <Textfield {...register(GRAPH_JQL, {required: true})} />
+                <Textfield
+                    value={jqlInput}
+                    onChange={(e) => setJqlInput(e.target.value)}
+                    placeholder={'e.g. project = ABC AND statusCategory != Done'}
+                />
+                <LoadingButton appearance="primary" isLoading={validating && validationMode === 'single'} onClick={validateSingle}>
+                    Validate JQL
+                </LoadingButton>
+                {validationMode === 'single' && validationError && (
+                    <SectionMessage appearance="error" title="Validation failed">{validationError}</SectionMessage>
+                )}
+                {validationMode === 'single' && validationResults && (
+                    <SectionMessage appearance="confirmation" title={`Found ${validationTotal} issues`}>
+                        Your JQL returned {validationTotal} issue(s).
+                    </SectionMessage>
+                )}
+            </FormSection>
+
+            {/* Multi-JQL comparison mode (optional). If provided, the app will compare totals across these JQLs. */}
+            <FormSection>
+                <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>
+                    Multi JQL (optional)
+                </Label>
+                <TextArea
+                    value={multiInput}
+                    onChange={(e) => setMultiInput(e.target.value)}
+                    placeholder={
+                        "Enter one per line in the format: Label: JQL\n" +
+                        "Example:\nTeam A: assignee in (alice,bob) AND statusCategory != Done\n" +
+                        "Team B: assignee in (charlie,diana) AND statusCategory != Done"
+                    }
+                />
+                <SectionMessage appearance="information" title="How it works">
+                    When Multi JQL is provided, the gadget compares totals per line and ignores Group/Stack/Aggregation settings below. Pie/Donut works best.
+                </SectionMessage>
+                <LoadingButton appearance="primary" isLoading={validating && validationMode === 'multi'} onClick={validateMulti}>
+                    Validate Multi JQLs
+                </LoadingButton>
+                {validationMode === 'multi' && validationError && (
+                    <SectionMessage appearance="error" title="Validation failed">{validationError}</SectionMessage>
+                )}
+                {validationMode === 'multi' && validationResults && (
+                    <>
+                        <SectionMessage appearance="success" title={`Combined total: ${validationTotal} issues`}>
+                            Totals per line shown below.
+                        </SectionMessage>
+                        <DynamicTable
+                            head={{ cells: [ { content: 'Label' }, { content: 'Total' }, { content: 'Status' } ] }}
+                            rows={validationResults.map((r, i) => ({
+                                key: String(i),
+                                cells: [
+                                    { content: <Text>{r.label}</Text> },
+                                    { content: <Text>{typeof r.total === 'number' ? r.total : '-'}</Text> },
+                                    { content: r.error ? <SectionMessage appearance="error" title="Error" /> : <Text>OK</Text> },
+                                ],
+                            }))}
+                            rowsPerPage={10}
+                            defaultPage={1}
+                        />
+                    </>
+                )}
             </FormSection>
 
             <FormSection>
@@ -186,8 +374,7 @@ export const Edit = () => {
 
             <FormSection>
                 <Label labelFor={getFieldId(GRAPH_GROUP)}>
-                    Group By
-                    <RequiredAsterisk/>
+                    Group By (ignored in Multi JQL)
                 </Label>
                 {groupError && (
                     <SectionMessage appearance="error" title="Failed to load fields">
@@ -199,7 +386,7 @@ export const Edit = () => {
                     onChange={(e) => setGroupQuery(e.target.value)}
                 />
                 <Select
-                    {...register(GRAPH_GROUP, {required: true})}
+                    {...register(GRAPH_GROUP)}
                     isDisabled={groupLoading}
                     options={groupOptions}
                 />
@@ -208,7 +395,7 @@ export const Edit = () => {
             {/* Optional: allow a second grouping for stacked charts */}
             <FormSection>
                 <Label labelFor={getFieldId(GRAPH_STACK)}>
-                    Stack By (optional)
+                    Stack By (optional, ignored in Multi JQL)
                 </Label>
                 {stackError && (
                     <SectionMessage appearance="error" title="Failed to load fields">
@@ -228,11 +415,10 @@ export const Edit = () => {
 
             <FormSection>
                 <Label labelFor={getFieldId(GRAPH_AGG)}>
-                    Aggregation
-                    <RequiredAsterisk/>
+                    Aggregation (ignored in Multi JQL)
                 </Label>
                 <Select
-                    {...register(GRAPH_AGG, {required: true})}
+                    {...register(GRAPH_AGG)}
                     options={AGG_OPTIONS}
                 />
             </FormSection>
@@ -294,6 +480,7 @@ const View = () => {
     const context = useProductContext();
 
     useEffect(() => {
+        // Fetch chart data from resolver; it will auto-detect multi-JQL vs single-JQL mode.
         invoke('getText2', {example: 'my-invoke-variable'}).then(setData);
     }, []);
 
@@ -306,15 +493,28 @@ const View = () => {
     } = context;
 
     const chartType = gadgetConfiguration[GRAPH_TYPE]?.value || gadgetConfiguration[GRAPH_TYPE];
-    const result = data ? buildResult(data) : null;
+    const isError = data && data.error;
+    const result = data && !isError ? buildResult(data) : null;
+
+    const multi = gadgetConfiguration[GRAPH_MULTI_JQL];
 
     return (
         <>
-            {/*<Text>Title: {gadgetConfiguration[GRAPH_NAME]}</Text>*/}
-            {/*<Text>JQL: {gadgetConfiguration[GRAPH_JQL]}</Text>*/}
-            {/*<Text>Chart Type: {chartType}</Text>*/}
+            {multi && (
+                <SectionMessage appearance="information" title="Comparison mode">
+                    Rendering totals per Multi JQL entry. Group/Stack/Aggregation are ignored.
+                </SectionMessage>
+            )}
+            {isError && (
+                <SectionMessage appearance="error" title="Unable to render chart">
+                    <Text>{String(data.error)}</Text>
+                    {data.status && <Text>Status: {String(data.status)}</Text>}
+                    {data.jql && <Text>JQL: {String(data.jql)}</Text>}
+                    {data.body && <Text>Details: {String(data.body).slice(0, 500)}</Text>}
+                </SectionMessage>
+            )}
             {result && <ChartRenderer chartType={chartType} result={result} />}
-            {!result && <Text>Loading chart data...</Text>}
+            {!result && !isError && <Text>Loading chart data...</Text>}
         </>
     );
 };

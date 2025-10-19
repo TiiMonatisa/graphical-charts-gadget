@@ -21,6 +21,7 @@ resolver.define('getText2', async (req) => {
   const cfg = req.context.extension.gadgetConfiguration || {};
   const name = cfg['graph-name'];
   const jql = cfg['graph-jql'] || "";
+  const multi = cfg['graph-multi-jql'];
 
   // Fix: Handle both object with .value and direct string value
   const chartType = (cfg['graph-type']?.value) || cfg['graph-type'] || "bar";
@@ -30,6 +31,99 @@ resolver.define('getText2', async (req) => {
   const groupFieldId = normId(cfg['graph-group']);
   const stackFieldId = normId(cfg['graph-stack']); // optional second grouping for stacked charts
   const aggSpec = (cfg['graph-agg']?.value) || cfg['graph-agg'];
+
+  // If multi-JQL is provided, we take a different, simpler path (totals per JQL).
+  // Multi-JQL comparison mode: each line is "Label: JQL" (or "Label = JQL").
+  // We fetch only the total count per JQL and return a simple dataset suitable for Pie/Donut charts.
+  if (multi && String(multi).trim().length > 0) {
+    const lines = String(multi)
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+
+    if (lines.length === 0) {
+      return { error: 'Multi JQL provided but no valid lines were found.' };
+    }
+
+    const items = [];
+    for (const line of lines) {
+      // Attempt to split by the first ':' or '=' to separate label from the JQL
+      const m = line.match(/^(.*?)[=:](.*)$/);
+      if (!m) {
+        // If no label separator, use the whole line as JQL and auto-label
+        items.push({ label: line.slice(0, 24).trim() || 'Series', jql: line });
+      } else {
+        const label = m[1].trim() || 'Series';
+        const q = m[2].trim();
+        if (q) items.push({ label, jql: q });
+      }
+    }
+
+    if (items.length === 0) {
+      return { error: 'No valid JQL found in Multi JQL input.' };
+    }
+
+    const results = [];
+    for (const it of items) {
+      // Count issues by paging via nextPageToken when present; fallback to 'total' if available.
+      const MAX_RESULTS = 1000; // between 1 and 5000
+      const MAX_PAGES = 100;    // safety cap
+      let total = 0;
+      let nextToken = null;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        // Build route with encoded params; use fields=key for minimal payload
+        let url = route`/rest/api/3/search/jql?jql=${it.jql}&maxResults=${String(MAX_RESULTS)}&fields=key`;
+        if (nextToken) {
+          url = `${url}&nextPageToken=${encodeURIComponent(nextToken)}`;
+        }
+        const resp = await api.asUser().requestJira(url, { method: 'GET', headers: { Accept: 'application/json' } });
+        if (!resp.ok) {
+          const text = await resp.text();
+          return { error: 'Jira search failed', status: resp.status, body: text, jql: it.jql };
+        }
+        const data = await resp.json();
+        const issues = Array.isArray(data.issues) ? data.issues : [];
+        total += issues.length;
+        const hasTokenPaging = Object.prototype.hasOwnProperty.call(data, 'isLast') || Object.prototype.hasOwnProperty.call(data, 'nextPageToken');
+        if (hasTokenPaging) {
+          if (data.isLast === true) break;
+          nextToken = data.nextPageToken;
+          if (!nextToken) break;
+        } else if (typeof data.total === 'number') {
+          total = data.total;
+          break;
+        } else {
+          break;
+        }
+      }
+      results.push({ type: it.label, label: it.label, value: total });
+    }
+
+    const accessors = {
+      donut: { colorAccessor: 'type', labelAccessor: 'label', valueAccessor: 'value' },
+      pie: { colorAccessor: 'type', labelAccessor: 'label', valueAccessor: 'value' },
+      bar: { xAccessor: 'label', yAccessor: 'value', colorAccessor: 'type' },
+      'horizontal-bar': { xAccessor: 'label', yAccessor: 'value', colorAccessor: 'type' },
+      'stack-bar': { xAccessor: 'label', yAccessor: 'value', colorAccessor: 'type' },
+      'horizontal-stack-bar': { xAccessor: 'label', yAccessor: 'value', colorAccessor: 'type' },
+      line: { xAccessor: 'label', yAccessor: 'value' },
+    };
+
+    return {
+      title: name,
+      chartType: (cfg['graph-type']?.value) || cfg['graph-type'] || 'pie',
+      groupBy: null,
+      stackBy: null,
+      aggregation: 'count',
+      data: results,
+      accessors,
+      meta: {
+        mode: 'multi-jql',
+        jqls: items.map(i => ({ label: i.label, jql: i.jql })),
+        notes: ['Totals per JQL line; ideal for Pie/Donut comparisons.'],
+      },
+    };
+  }
 
   if (!name || !jql || !groupFieldId) {
     return {
