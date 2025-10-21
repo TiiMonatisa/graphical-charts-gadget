@@ -18,7 +18,7 @@ import {
   useForm,
   SectionMessage,
 } from "@forge/react";
-import { requestJira } from "@forge/bridge";
+import { requestJira, view } from "@forge/bridge";
 import {
   GRAPH_NAME,
   GRAPH_JQL,
@@ -42,10 +42,6 @@ const Edit = () => {
 
   const currentGroupValue = toId(cfg[GRAPH_GROUP]);
   const currentStackValue = toId(cfg[GRAPH_STACK]);
-
-  // Local states for inputs; matches original behavior
-  const [jqlInput, setJqlInput] = useState(cfg[GRAPH_JQL] || "");
-  const [multiInput, setMultiInput] = useState(cfg[GRAPH_MULTI_JQL] || "");
 
   // Type-ahead state for field search
   const [groupQuery, setGroupQuery] = useState("");
@@ -153,9 +149,10 @@ const Edit = () => {
   }, [stackQuery, currentStackValue]);
 
   // Submit handler — uses the built-in Form submit
-  const onSubmit = (formData) => {
+  const onSubmit = async (formData) => {
     // Form submission is handled automatically by UI Kit gadget config.
     // We simply return, as the platform persists fields in gadgetConfiguration.
+    await view.submit(formData);
     return formData;
   };
 
@@ -165,34 +162,26 @@ const Edit = () => {
         <Label labelFor={getFieldId(GRAPH_NAME)}>
           Gadget title <RequiredAsterisk />
         </Label>
-        <Textfield {...register(GRAPH_NAME)} />
+        <Textfield {...register(GRAPH_NAME, { defaultValue: cfg[GRAPH_NAME] || "" })} />
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_TYPE)}>Chart type</Label>
-        <Select {...register(GRAPH_TYPE)} options={CHART_OPTIONS} />
+        <Select {...register(GRAPH_TYPE, { defaultValue: cfg[GRAPH_TYPE] })} options={CHART_OPTIONS} />
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_JQL)}>
           JQL (ignored if Multi JQL is set)
         </Label>
-        <TextArea
-          {...register(GRAPH_JQL)}
-          value={jqlInput}
-          onChange={(e) => setJqlInput(e.target.value)}
-        />
+        <TextArea {...register(GRAPH_JQL, { defaultValue: cfg[GRAPH_JQL] || "" })} />
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>
           Multi JQL (one per line as Label: JQL)
         </Label>
-        <TextArea
-          {...register(GRAPH_MULTI_JQL)}
-          value={multiInput}
-          onChange={(e) => setMultiInput(e.target.value)}
-        />
+        <TextArea {...register(GRAPH_MULTI_JQL, { defaultValue: cfg[GRAPH_MULTI_JQL] || "" })} />
         <SectionMessage appearance="information" title="Tip">
           When Multi JQL is provided, Group/Stack/Aggregation are ignored. Each line is counted.
         </SectionMessage>
@@ -210,7 +199,11 @@ const Edit = () => {
           value={groupQuery}
           onChange={(e) => setGroupQuery(e.target.value)}
         />
-        <Select {...register(GRAPH_GROUP)} isDisabled={groupLoading} options={groupOptions} />
+        <Select
+          {...register(GRAPH_GROUP, { defaultValue: cfg[GRAPH_GROUP] })}
+          isDisabled={groupLoading}
+          options={groupOptions}
+        />
       </FormSection>
 
       <FormSection>
@@ -225,14 +218,18 @@ const Edit = () => {
           value={stackQuery}
           onChange={(e) => setStackQuery(e.target.value)}
         />
-        <Select {...register(GRAPH_STACK)} isDisabled={stackLoading} options={stackOptions} />
+        <Select
+          {...register(GRAPH_STACK, { defaultValue: cfg[GRAPH_STACK] })}
+          isDisabled={stackLoading}
+          options={stackOptions}
+        />
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_AGG)}>
           Aggregation (ignored in Multi JQL)
         </Label>
-        <Select {...register(GRAPH_AGG)} options={AGG_OPTIONS} />
+        <Select {...register(GRAPH_AGG, { defaultValue: cfg[GRAPH_AGG] })} options={AGG_OPTIONS} />
       </FormSection>
 
       <FormFooter>
