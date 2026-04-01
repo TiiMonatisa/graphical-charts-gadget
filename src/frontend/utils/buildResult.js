@@ -5,7 +5,12 @@
 
 export const buildResult = (payload) => {
   const { chartType, data, accessors, title } = payload;
-  const subtitle = `JQL: ${payload.meta.jql}` || "";
+  const subtitle =
+    payload.meta?.mode === "multi-jql"
+      ? `Multi JQL comparison (${payload.meta?.jqls?.length || 0} queries)`
+      : payload.meta?.jql
+        ? `JQL: ${payload.meta.jql}`
+        : "";
   const acc = accessors?.[chartType] || {};
 
   // Resolve the accessor keys the chart expects.
@@ -13,6 +18,6 @@ export const buildResult = (payload) => {
   const yKey = acc.yAccessor ?? acc.valueAccessor ?? "value";
   const colorKey = acc.colorAccessor ?? "type";
 
-  return { data, xKey, yKey, colorKey, title, subtitle };
+  return { data, xKey, yKey, colorKey, title, subtitle, meta: payload.meta };
 };
 

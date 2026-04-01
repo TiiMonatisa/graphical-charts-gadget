@@ -1,49 +1,68 @@
-// Edit view for the dashboard gadget configuration.
-// This component remains functionally equivalent to the original single-file version
-// but is now isolated as a standalone component to keep the entrypoint lean.
+// Streamlined edit view for the dashboard gadget configuration.
+// The goal here is to keep the current configuration visible without burying
+// the actual form in explanatory blocks and duplicated saved values.
 
 import React, { useEffect, useState } from "react";
 import {
-  Text,
-  Select,
-  useProductContext,
-  Textfield,
-  TextArea,
-  Form,
   Button,
-  FormSection,
+  Form,
   FormFooter,
+  FormSection,
   Label,
   RequiredAsterisk,
-  useForm,
   SectionMessage,
+  Select,
+  Text,
+  TextArea,
+  Textfield,
+  useForm,
+  useProductContext,
 } from "@forge/react";
 import { requestJira, view } from "@forge/bridge";
 import {
-  GRAPH_NAME,
+  AGG_OPTIONS,
+  CHART_OPTIONS,
+  GRAPH_AGG,
+  GRAPH_GROUP,
   GRAPH_JQL,
   GRAPH_MULTI_JQL,
-  GRAPH_TYPE,
-  GRAPH_GROUP,
-  GRAPH_AGG,
+  GRAPH_NAME,
   GRAPH_STACK,
-  CHART_OPTIONS,
-  AGG_OPTIONS,
+  GRAPH_TYPE,
 } from "../constants";
+import { parseMultiJqlInput } from "../../common/multiJql";
+
+const normalizeSelectValue = (value) =>
+  value && typeof value === "object" && "value" in value ? value.value : value || "";
+
+const normalizeSelectLabel = (value) =>
+  value && typeof value === "object" ? value.label || value.value || "" : value || "";
+
+const findOptionLabel = (options, value) =>
+  options.find((option) => option.value === value)?.label || value || "Not set";
+
+const buildFieldLabel = (value, resolvedFieldLabels) => {
+  const normalizedValue = normalizeSelectValue(value);
+
+  if (!normalizedValue) {
+    return "None";
+  }
+
+  if (normalizedValue === "statuscategory") {
+    return "Status Category";
+  }
+
+  return normalizeSelectLabel(value) || resolvedFieldLabels[normalizedValue] || normalizedValue;
+};
 
 const Edit = () => {
   const { handleSubmit, register, getFieldId } = useForm();
   const context = useProductContext();
   const cfg = context?.extension?.gadgetConfiguration || {};
 
-  // Helpers to normalize Select values which can be strings or {label,value} objects
-  const toId = (v) => (v && typeof v === "object" && "value" in v ? v.value : v || "");
-  const toLabel = (v) => (v && typeof v === "object" ? v.label || v.value || "" : v || "");
+  const currentGroupValue = normalizeSelectValue(cfg[GRAPH_GROUP]);
+  const currentStackValue = normalizeSelectValue(cfg[GRAPH_STACK]);
 
-  const currentGroupValue = toId(cfg[GRAPH_GROUP]);
-  const currentStackValue = toId(cfg[GRAPH_STACK]);
-
-  // Type-ahead state for field search
   const [groupQuery, setGroupQuery] = useState("");
   const [stackQuery, setStackQuery] = useState("");
   const [groupOptions, setGroupOptions] = useState([]);
@@ -52,106 +71,187 @@ const Edit = () => {
   const [stackLoading, setStackLoading] = useState(false);
   const [groupError, setGroupError] = useState(null);
   const [stackError, setStackError] = useState(null);
+  const [resolvedFieldLabels, setResolvedFieldLabels] = useState({});
+  const [multiJqlDraft, setMultiJqlDraft] = useState(cfg[GRAPH_MULTI_JQL] || "");
 
-  // Include synthetic options and preserve current selection in the option list
-  const withSpecialAndSelected = (base, selectedValue, includeNone) => {
-    const selectedId = toId(selectedValue);
-    const selectedLabel = toLabel(selectedValue) || selectedId;
-    const seen = new Set(base.map((o) => o.value));
-    const statusOpt = { label: "Status Category (derived)", value: "statuscategory" };
-    const result = [statusOpt, ...base];
+  const titleField = register(GRAPH_NAME, { required: true });
+  const chartTypeField = register(GRAPH_TYPE);
+  const singleJqlField = register(GRAPH_JQL);
+  const multiJqlField = register(GRAPH_MULTI_JQL);
+  const groupField = register(GRAPH_GROUP, { required: true });
+  const stackField = register(GRAPH_STACK);
+  const aggregationField = register(GRAPH_AGG);
+
+  const multiEntries = parseMultiJqlInput(multiJqlDraft);
+
+  const withSpecialAndSelected = (baseOptions, selectedValue, includeNone) => {
+    const selectedId = normalizeSelectValue(selectedValue);
+    const selectedLabel =
+      normalizeSelectLabel(selectedValue) || resolvedFieldLabels[selectedId] || selectedId;
+
+    const seen = new Set(baseOptions.map((option) => option.value));
+    const options = [{ label: "Status Category", value: "statuscategory" }, ...baseOptions];
+
     if (includeNone) {
-      result.unshift({ label: "(None)", value: "" });
+      options.unshift({ label: "(None)", value: "" });
     }
+
     if (selectedId && !seen.has(selectedId) && selectedId !== "statuscategory") {
-      result.push({ label: selectedLabel || selectedId, value: selectedId });
+      options.push({ label: selectedLabel, value: selectedId });
     }
-    return result;
+
+    return options;
   };
 
-  // Debounced field search — mirrors the previous inline logic
+  useEffect(() => {
+    const fieldIds = [currentGroupValue, currentStackValue].filter(
+      (fieldId) => fieldId && fieldId !== "statuscategory"
+    );
+
+    if (fieldIds.length === 0) {
+      return undefined;
+    }
+
+    let alive = true;
+
+    const loadSelectedFieldLabels = async () => {
+      try {
+        const response = await requestJira("/rest/api/3/field");
+        if (!response.ok) {
+          return;
+        }
+
+        const fields = await response.json();
+        const nextLabels = {};
+
+        for (const field of Array.isArray(fields) ? fields : []) {
+          if (fieldIds.includes(field.id)) {
+            nextLabels[field.id] = `${field.name} (${field.id})`;
+          }
+        }
+
+        if (alive && Object.keys(nextLabels).length > 0) {
+          setResolvedFieldLabels((previous) => ({ ...previous, ...nextLabels }));
+        }
+      } catch (error) {
+        // This lookup only improves readability in the summary and selected options.
+      }
+    };
+
+    loadSelectedFieldLabels();
+
+    return () => {
+      alive = false;
+    };
+  }, [currentGroupValue, currentStackValue]);
+
   useEffect(() => {
     let alive = true;
-    const q = groupQuery.trim();
-    if (q.length < 2) {
-      const base = [];
-      const opts = withSpecialAndSelected(base, currentGroupValue, false);
-      if (alive) setGroupOptions(opts);
+    const query = groupQuery.trim();
+
+    if (query.length < 2) {
+      if (alive) {
+        setGroupOptions(withSpecialAndSelected([], currentGroupValue, false));
+      }
       return () => {
         alive = false;
       };
     }
+
     setGroupLoading(true);
     setGroupError(null);
+
     const handle = setTimeout(async () => {
       try {
-        const resp = await requestJira(
-          `/rest/api/3/field/search?query=${encodeURIComponent(q)}&maxResults=50`
+        const response = await requestJira(
+          `/rest/api/3/field/search?query=${encodeURIComponent(query)}&maxResults=50`
         );
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`Failed to search fields: ${resp.status} ${text}`);
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Failed to search fields: ${response.status} ${text}`);
         }
-        const json = await resp.json();
-        const values = Array.isArray(json.values) ? json.values : [];
-        const base = values.map((f) => ({ label: `${f.name} (${f.id})`, value: f.id }));
-        if (alive) setGroupOptions(withSpecialAndSelected(base, currentGroupValue, false));
-      } catch (e) {
-        if (alive) setGroupError(e.message || String(e));
+
+        const payload = await response.json();
+        const baseOptions = (Array.isArray(payload.values) ? payload.values : []).map((field) => ({
+          label: `${field.name} (${field.id})`,
+          value: field.id,
+        }));
+
+        if (alive) {
+          setGroupOptions(withSpecialAndSelected(baseOptions, currentGroupValue, false));
+        }
+      } catch (error) {
+        if (alive) {
+          setGroupError(error?.message || String(error));
+        }
       } finally {
-        if (alive) setGroupLoading(false);
+        if (alive) {
+          setGroupLoading(false);
+        }
       }
     }, 300);
+
     return () => {
       clearTimeout(handle);
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupQuery, currentGroupValue]);
+  }, [groupQuery, currentGroupValue, resolvedFieldLabels]);
 
   useEffect(() => {
     let alive = true;
-    const q = stackQuery.trim();
-    if (q.length < 2) {
-      const base = [];
-      const opts = withSpecialAndSelected(base, currentStackValue, true);
-      if (alive) setStackOptions(opts);
+    const query = stackQuery.trim();
+
+    if (query.length < 2) {
+      if (alive) {
+        setStackOptions(withSpecialAndSelected([], currentStackValue, true));
+      }
       return () => {
         alive = false;
       };
     }
+
     setStackLoading(true);
     setStackError(null);
+
     const handle = setTimeout(async () => {
       try {
-        const resp = await requestJira(
-          `/rest/api/3/field/search?query=${encodeURIComponent(q)}&maxResults=50`
+        const response = await requestJira(
+          `/rest/api/3/field/search?query=${encodeURIComponent(query)}&maxResults=50`
         );
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`Failed to search fields: ${resp.status} ${text}`);
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Failed to search fields: ${response.status} ${text}`);
         }
-        const json = await resp.json();
-        const values = Array.isArray(json.values) ? json.values : [];
-        const base = values.map((f) => ({ label: `${f.name} (${f.id})`, value: f.id }));
-        if (alive) setStackOptions(withSpecialAndSelected(base, currentStackValue, true));
-      } catch (e) {
-        if (alive) setStackError(e.message || String(e));
+
+        const payload = await response.json();
+        const baseOptions = (Array.isArray(payload.values) ? payload.values : []).map((field) => ({
+          label: `${field.name} (${field.id})`,
+          value: field.id,
+        }));
+
+        if (alive) {
+          setStackOptions(withSpecialAndSelected(baseOptions, currentStackValue, true));
+        }
+      } catch (error) {
+        if (alive) {
+          setStackError(error?.message || String(error));
+        }
       } finally {
-        if (alive) setStackLoading(false);
+        if (alive) {
+          setStackLoading(false);
+        }
       }
     }, 300);
+
     return () => {
       clearTimeout(handle);
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stackQuery, currentStackValue]);
+  }, [stackQuery, currentStackValue, resolvedFieldLabels]);
 
-  // Submit handler — uses the built-in Form submit
   const onSubmit = async (formData) => {
-    // Form submission is handled automatically by UI Kit gadget config.
-    // We simply return, as the platform persists fields in gadgetConfiguration.
     await view.submit(formData);
     return formData;
   };
@@ -159,84 +259,103 @@ const Edit = () => {
   return (
     <Form onSubmit={handleSubmit(onSubmit)}>
       <FormSection>
+        <SectionMessage appearance="information" title="Current setup">
+          <Text>
+            {`${cfg[GRAPH_NAME] || "Untitled"} | ${findOptionLabel(
+              CHART_OPTIONS,
+              normalizeSelectValue(cfg[GRAPH_TYPE])
+            )} | ${
+              String(cfg[GRAPH_MULTI_JQL] || "").trim() ? "Multi JQL" : "Single JQL"
+            }`}
+          </Text>
+          <Text>
+            {`Group: ${buildFieldLabel(cfg[GRAPH_GROUP], resolvedFieldLabels)} | Stack: ${buildFieldLabel(
+              cfg[GRAPH_STACK],
+              resolvedFieldLabels
+            )} | Aggregation: ${findOptionLabel(
+              AGG_OPTIONS,
+              normalizeSelectValue(cfg[GRAPH_AGG]) || "count"
+            )}`}
+          </Text>
+        </SectionMessage>
+      </FormSection>
+
+      <FormSection>
         <Label labelFor={getFieldId(GRAPH_NAME)}>
           Gadget title <RequiredAsterisk />
         </Label>
-        <Textfield {...register(GRAPH_NAME, { defaultValue: cfg[GRAPH_NAME] || "" })} />
+        <Textfield {...titleField} defaultValue={cfg[GRAPH_NAME] || ""} />
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_TYPE)}>Chart type</Label>
-        <Select {...register(GRAPH_TYPE, { defaultValue: cfg[GRAPH_TYPE] })} options={CHART_OPTIONS} />
+        <Select {...chartTypeField} defaultValue={cfg[GRAPH_TYPE] || "bar"} options={CHART_OPTIONS} />
       </FormSection>
 
       <FormSection>
-        <Label labelFor={getFieldId(GRAPH_JQL)}>
-          JQL (ignored if Multi JQL is set)
-        </Label>
-        <TextArea {...register(GRAPH_JQL, { defaultValue: cfg[GRAPH_JQL] || "" })} />
+        <Label labelFor={getFieldId(GRAPH_JQL)}>Base JQL</Label>
+        <TextArea
+          {...singleJqlField}
+          defaultValue={cfg[GRAPH_JQL] || ""}
+          placeholder='Example: project = DEMO AND resolution is EMPTY'
+        />
       </FormSection>
 
       <FormSection>
-        <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>
-          Multi JQL (one per line as Label: JQL)
-        </Label>
-        <TextArea {...register(GRAPH_MULTI_JQL, { defaultValue: cfg[GRAPH_MULTI_JQL] || "" })} />
-        <SectionMessage appearance="information" title="Tip">
-          When Multi JQL is provided, Group/Stack/Aggregation are ignored. Each line is counted.
-        </SectionMessage>
+        <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>Multi JQL (optional)</Label>
+        <TextArea
+          {...multiJqlField}
+          defaultValue={cfg[GRAPH_MULTI_JQL] || ""}
+          placeholder={`Open work :: project = DEMO AND resolution is EMPTY
+Ready for QA => project = DEMO AND status = "Ready for QA"`}
+          onChange={(event) => {
+            setMultiJqlDraft(event.target.value);
+            return multiJqlField.onChange(event);
+          }}
+        />
+        <Text>Optional labels: `Label :: JQL`, `Label =&gt; JQL`, or `Label | JQL`.</Text>
+        {!!multiEntries.length && (
+          <Text>{`Detected comparison entries: ${multiEntries
+            .map((entry) => entry.label)
+            .slice(0, 5)
+            .join(", ")}${multiEntries.length > 5 ? "..." : ""}`}</Text>
+        )}
       </FormSection>
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_GROUP)}>
           Group by field <RequiredAsterisk />
         </Label>
-        {groupError && (
-          <Text appearance="error">Field search error: {String(groupError)}</Text>
-        )}
         <Textfield
-          placeholder="Search fields (min 2 characters)"
+          placeholder="Search fields"
           value={groupQuery}
-          onChange={(e) => setGroupQuery(e.target.value)}
+          onChange={(event) => setGroupQuery(event.target.value)}
         />
-        <Select
-          {...register(GRAPH_GROUP, { defaultValue: cfg[GRAPH_GROUP] })}
-          isDisabled={groupLoading}
-          options={groupOptions}
-        />
+        <Select {...groupField} defaultValue={cfg[GRAPH_GROUP] || ""} isDisabled={groupLoading} options={groupOptions} />
+        {groupError && <Text>{`Field search error: ${String(groupError)}`}</Text>}
       </FormSection>
 
       <FormSection>
-        <Label labelFor={getFieldId(GRAPH_STACK)}>
-          Stack by field (optional)
-        </Label>
-        {stackError && (
-          <Text appearance="error">Field search error: {String(stackError)}</Text>
-        )}
+        <Label labelFor={getFieldId(GRAPH_STACK)}>Stack by field (optional)</Label>
         <Textfield
-          placeholder="Search fields (min 2 characters)"
+          placeholder="Search fields"
           value={stackQuery}
-          onChange={(e) => setStackQuery(e.target.value)}
+          onChange={(event) => setStackQuery(event.target.value)}
         />
-        <Select
-          {...register(GRAPH_STACK, { defaultValue: cfg[GRAPH_STACK] })}
-          isDisabled={stackLoading}
-          options={stackOptions}
-        />
+        <Select {...stackField} defaultValue={cfg[GRAPH_STACK] || ""} isDisabled={stackLoading} options={stackOptions} />
+        {stackError && <Text>{`Field search error: ${String(stackError)}`}</Text>}
       </FormSection>
 
       <FormSection>
-        <Label labelFor={getFieldId(GRAPH_AGG)}>
-          Aggregation (ignored in Multi JQL)
-        </Label>
-        <Select {...register(GRAPH_AGG, { defaultValue: cfg[GRAPH_AGG] })} options={AGG_OPTIONS} />
+        <Label labelFor={getFieldId(GRAPH_AGG)}>Aggregation</Label>
+        <Select {...aggregationField} defaultValue={cfg[GRAPH_AGG] || "count"} options={AGG_OPTIONS} />
       </FormSection>
 
       <FormFooter>
         <Button appearance="primary" type="submit">
           Submit
         </Button>
-        <Button appearance="cancel" type="cancel">
+        <Button type="button" onClick={() => view.close()}>
           Cancel
         </Button>
       </FormFooter>
@@ -245,4 +364,3 @@ const Edit = () => {
 };
 
 export default Edit;
-
