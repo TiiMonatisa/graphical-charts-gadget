@@ -5,6 +5,7 @@
 import React, { useEffect, useState } from "react";
 import {
   Button,
+  ButtonGroup,
   Form,
   FormFooter,
   FormSection,
@@ -41,6 +42,9 @@ const normalizeSelectLabel = (value) =>
 const findOptionLabel = (options, value) =>
   options.find((option) => option.value === value)?.label || value || "Not set";
 
+const normalizeSearchInput = (value) =>
+  typeof value === "string" ? value : value?.target?.value || "";
+
 const buildFieldLabel = (value, resolvedFieldLabels) => {
   const normalizedValue = normalizeSelectValue(value);
 
@@ -55,11 +59,36 @@ const buildFieldLabel = (value, resolvedFieldLabels) => {
   return normalizeSelectLabel(value) || resolvedFieldLabels[normalizedValue] || normalizedValue;
 };
 
+const JQL_MODE_OPTIONS = [
+  { label: "Single JQL", value: "single" },
+  { label: "Multi JQL", value: "multi" },
+];
+
+const STACK_ENABLED_CHART_TYPES = new Set(["stack-bar", "horizontal-stack-bar"]);
+
+const supportsStackBy = (chartType) => STACK_ENABLED_CHART_TYPES.has(chartType);
+
+const filterFieldOptions = (options, query) => {
+  const trimmed = String(query || "").trim().toLowerCase();
+  if (!trimmed) {
+    return options.slice(0, 50);
+  }
+
+  return options
+    .filter((option) => {
+      const label = String(option.label || "").toLowerCase();
+      const value = String(option.value || "").toLowerCase();
+      return label.includes(trimmed) || value.includes(trimmed);
+    })
+    .slice(0, 50);
+};
+
 const Edit = () => {
   const { handleSubmit, register, getFieldId } = useForm();
   const context = useProductContext();
   const cfg = context?.extension?.gadgetConfiguration || {};
 
+  const initialChartType = normalizeSelectValue(cfg[GRAPH_TYPE]) || "bar";
   const currentGroupValue = normalizeSelectValue(cfg[GRAPH_GROUP]);
   const currentStackValue = normalizeSelectValue(cfg[GRAPH_STACK]);
 
@@ -67,12 +96,17 @@ const Edit = () => {
   const [stackQuery, setStackQuery] = useState("");
   const [groupOptions, setGroupOptions] = useState([]);
   const [stackOptions, setStackOptions] = useState([]);
+  const [allFieldOptions, setAllFieldOptions] = useState([]);
   const [groupLoading, setGroupLoading] = useState(false);
   const [stackLoading, setStackLoading] = useState(false);
   const [groupError, setGroupError] = useState(null);
   const [stackError, setStackError] = useState(null);
   const [resolvedFieldLabels, setResolvedFieldLabels] = useState({});
   const [multiJqlDraft, setMultiJqlDraft] = useState(cfg[GRAPH_MULTI_JQL] || "");
+  const [jqlMode, setJqlMode] = useState(
+    String(cfg[GRAPH_MULTI_JQL] || "").trim() ? "multi" : "single"
+  );
+  const [selectedChartType, setSelectedChartType] = useState(initialChartType);
 
   const titleField = register(GRAPH_NAME, { required: true });
   const chartTypeField = register(GRAPH_TYPE);
@@ -104,156 +138,81 @@ const Edit = () => {
   };
 
   useEffect(() => {
-    const fieldIds = [currentGroupValue, currentStackValue].filter(
-      (fieldId) => fieldId && fieldId !== "statuscategory"
-    );
-
-    if (fieldIds.length === 0) {
-      return undefined;
-    }
-
     let alive = true;
 
-    const loadSelectedFieldLabels = async () => {
+    const loadFields = async () => {
       try {
+        setGroupLoading(true);
+        setStackLoading(true);
+
         const response = await requestJira("/rest/api/3/field");
         if (!response.ok) {
-          return;
+          const text = await response.text();
+          throw new Error(`Failed to load fields: ${response.status} ${text}`);
         }
 
         const fields = await response.json();
+        const fieldOptions = (Array.isArray(fields) ? fields : [])
+          .map((field) => ({
+            label: `${field.name} (${field.id})`,
+            value: field.id,
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label));
+
         const nextLabels = {};
-
-        for (const field of Array.isArray(fields) ? fields : []) {
-          if (fieldIds.includes(field.id)) {
-            nextLabels[field.id] = `${field.name} (${field.id})`;
-          }
+        for (const option of fieldOptions) {
+          nextLabels[option.value] = option.label;
         }
-
-        if (alive && Object.keys(nextLabels).length > 0) {
-          setResolvedFieldLabels((previous) => ({ ...previous, ...nextLabels }));
-        }
-      } catch (error) {
-        // This lookup only improves readability in the summary and selected options.
-      }
-    };
-
-    loadSelectedFieldLabels();
-
-    return () => {
-      alive = false;
-    };
-  }, [currentGroupValue, currentStackValue]);
-
-  useEffect(() => {
-    let alive = true;
-    const query = groupQuery.trim();
-
-    if (query.length < 2) {
-      if (alive) {
-        setGroupOptions(withSpecialAndSelected([], currentGroupValue, false));
-      }
-      return () => {
-        alive = false;
-      };
-    }
-
-    setGroupLoading(true);
-    setGroupError(null);
-
-    const handle = setTimeout(async () => {
-      try {
-        const response = await requestJira(
-          `/rest/api/3/field/search?query=${encodeURIComponent(query)}&maxResults=50`
-        );
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`Failed to search fields: ${response.status} ${text}`);
-        }
-
-        const payload = await response.json();
-        const baseOptions = (Array.isArray(payload.values) ? payload.values : []).map((field) => ({
-          label: `${field.name} (${field.id})`,
-          value: field.id,
-        }));
 
         if (alive) {
-          setGroupOptions(withSpecialAndSelected(baseOptions, currentGroupValue, false));
+          setAllFieldOptions(fieldOptions);
+          setResolvedFieldLabels(nextLabels);
         }
       } catch (error) {
         if (alive) {
-          setGroupError(error?.message || String(error));
+          const message = error?.message || String(error);
+          setGroupError(message);
+          setStackError(message);
         }
       } finally {
         if (alive) {
           setGroupLoading(false);
-        }
-      }
-    }, 300);
-
-    return () => {
-      clearTimeout(handle);
-      alive = false;
-    };
-  }, [groupQuery, currentGroupValue, resolvedFieldLabels]);
-
-  useEffect(() => {
-    let alive = true;
-    const query = stackQuery.trim();
-
-    if (query.length < 2) {
-      if (alive) {
-        setStackOptions(withSpecialAndSelected([], currentStackValue, true));
-      }
-      return () => {
-        alive = false;
-      };
-    }
-
-    setStackLoading(true);
-    setStackError(null);
-
-    const handle = setTimeout(async () => {
-      try {
-        const response = await requestJira(
-          `/rest/api/3/field/search?query=${encodeURIComponent(query)}&maxResults=50`
-        );
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`Failed to search fields: ${response.status} ${text}`);
-        }
-
-        const payload = await response.json();
-        const baseOptions = (Array.isArray(payload.values) ? payload.values : []).map((field) => ({
-          label: `${field.name} (${field.id})`,
-          value: field.id,
-        }));
-
-        if (alive) {
-          setStackOptions(withSpecialAndSelected(baseOptions, currentStackValue, true));
-        }
-      } catch (error) {
-        if (alive) {
-          setStackError(error?.message || String(error));
-        }
-      } finally {
-        if (alive) {
           setStackLoading(false);
         }
       }
-    }, 300);
+    };
+
+    loadFields();
 
     return () => {
-      clearTimeout(handle);
       alive = false;
     };
-  }, [stackQuery, currentStackValue, resolvedFieldLabels]);
+  }, []);
+
+  useEffect(() => {
+    setGroupOptions(
+      withSpecialAndSelected(filterFieldOptions(allFieldOptions, groupQuery), currentGroupValue, false)
+    );
+  }, [allFieldOptions, groupQuery, currentGroupValue, resolvedFieldLabels]);
+
+  useEffect(() => {
+    setStackOptions(
+      withSpecialAndSelected(filterFieldOptions(allFieldOptions, stackQuery), currentStackValue, true)
+    );
+  }, [allFieldOptions, stackQuery, currentStackValue, resolvedFieldLabels]);
 
   const onSubmit = async (formData) => {
-    await view.submit(formData);
-    return formData;
+    const nextFormData = {
+      ...formData,
+      [GRAPH_JQL]: jqlMode === "single" ? formData[GRAPH_JQL] || "" : "",
+      [GRAPH_MULTI_JQL]: jqlMode === "multi" ? formData[GRAPH_MULTI_JQL] || "" : "",
+      [GRAPH_STACK]: supportsStackBy(selectedChartType) && jqlMode === "single"
+        ? formData[GRAPH_STACK] || ""
+        : "",
+    };
+
+    await view.submit(nextFormData);
+    return nextFormData;
   };
 
   return (
@@ -289,67 +248,109 @@ const Edit = () => {
 
       <FormSection>
         <Label labelFor={getFieldId(GRAPH_TYPE)}>Chart type</Label>
-        <Select {...chartTypeField} defaultValue={cfg[GRAPH_TYPE] || "bar"} options={CHART_OPTIONS} />
-      </FormSection>
-
-      <FormSection>
-        <Label labelFor={getFieldId(GRAPH_JQL)}>Base JQL</Label>
-        <TextArea
-          {...singleJqlField}
-          defaultValue={cfg[GRAPH_JQL] || ""}
-          placeholder='Example: project = DEMO AND resolution is EMPTY'
-        />
-      </FormSection>
-
-      <FormSection>
-        <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>Multi JQL (optional)</Label>
-        <TextArea
-          {...multiJqlField}
-          defaultValue={cfg[GRAPH_MULTI_JQL] || ""}
-          placeholder={`Open work :: project = DEMO AND resolution is EMPTY
-Ready for QA => project = DEMO AND status = "Ready for QA"`}
-          onChange={(event) => {
-            setMultiJqlDraft(event.target.value);
-            return multiJqlField.onChange(event);
+        <Select
+          {...chartTypeField}
+          defaultValue={cfg[GRAPH_TYPE] || "bar"}
+          onChange={(value) => {
+            setSelectedChartType(normalizeSelectValue(value));
+            return chartTypeField.onChange(value);
           }}
+          options={CHART_OPTIONS}
         />
-        <Text>Optional labels: `Label :: JQL`, `Label =&gt; JQL`, or `Label | JQL`.</Text>
-        {!!multiEntries.length && (
-          <Text>{`Detected comparison entries: ${multiEntries
-            .map((entry) => entry.label)
-            .slice(0, 5)
-            .join(", ")}${multiEntries.length > 5 ? "..." : ""}`}</Text>
-        )}
       </FormSection>
 
       <FormSection>
-        <Label labelFor={getFieldId(GRAPH_GROUP)}>
-          Group by field <RequiredAsterisk />
-        </Label>
-        <Textfield
-          placeholder="Search fields"
-          value={groupQuery}
-          onChange={(event) => setGroupQuery(event.target.value)}
-        />
-        <Select {...groupField} defaultValue={cfg[GRAPH_GROUP] || ""} isDisabled={groupLoading} options={groupOptions} />
-        {groupError && <Text>{`Field search error: ${String(groupError)}`}</Text>}
+        <Label labelFor="jql-mode">Query mode</Label>
+        <ButtonGroup>
+          {JQL_MODE_OPTIONS.map((option) => (
+            <Button
+              appearance={jqlMode === option.value ? "primary" : "default"}
+              key={option.value}
+              onClick={() => setJqlMode(option.value)}
+              type="button"
+            >
+              {option.label}
+            </Button>
+          ))}
+        </ButtonGroup>
       </FormSection>
 
-      <FormSection>
-        <Label labelFor={getFieldId(GRAPH_STACK)}>Stack by field (optional)</Label>
-        <Textfield
-          placeholder="Search fields"
-          value={stackQuery}
-          onChange={(event) => setStackQuery(event.target.value)}
-        />
-        <Select {...stackField} defaultValue={cfg[GRAPH_STACK] || ""} isDisabled={stackLoading} options={stackOptions} />
-        {stackError && <Text>{`Field search error: ${String(stackError)}`}</Text>}
-      </FormSection>
+      {jqlMode === "single" && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_JQL)}>Base JQL</Label>
+          <TextArea
+            {...singleJqlField}
+            defaultValue={cfg[GRAPH_JQL] || ""}
+            placeholder='Example: project = DEMO AND resolution is EMPTY'
+          />
+        </FormSection>
+      )}
 
-      <FormSection>
-        <Label labelFor={getFieldId(GRAPH_AGG)}>Aggregation</Label>
-        <Select {...aggregationField} defaultValue={cfg[GRAPH_AGG] || "count"} options={AGG_OPTIONS} />
-      </FormSection>
+      {jqlMode === "multi" && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_MULTI_JQL)}>Multi JQL</Label>
+          <TextArea
+            {...multiJqlField}
+            defaultValue={cfg[GRAPH_MULTI_JQL] || ""}
+            placeholder={`Open work :: project = DEMO AND resolution is EMPTY
+Ready for QA => project = DEMO AND status = "Ready for QA"`}
+            onChange={(event) => {
+              setMultiJqlDraft(event.target.value);
+              return multiJqlField.onChange(event);
+            }}
+          />
+          <Text>Optional labels: `Label :: JQL`, `Label =&gt; JQL`, or `Label | JQL`.</Text>
+          {!!multiEntries.length && (
+            <Text>{`Detected comparison entries: ${multiEntries
+              .map((entry) => entry.label)
+              .slice(0, 5)
+              .join(", ")}${multiEntries.length > 5 ? "..." : ""}`}</Text>
+          )}
+        </FormSection>
+      )}
+
+      {jqlMode === "single" && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_GROUP)}>
+            Group by field <RequiredAsterisk />
+          </Label>
+          <Select
+            {...groupField}
+            defaultValue={cfg[GRAPH_GROUP] || ""}
+            isDisabled={groupLoading}
+            isLoading={groupLoading}
+            isSearchable
+            onInputChange={(value) => setGroupQuery(normalizeSearchInput(value))}
+            options={groupOptions}
+            placeholder="Type to search Jira fields"
+          />
+          {groupError && <Text>{`Field search error: ${String(groupError)}`}</Text>}
+        </FormSection>
+      )}
+
+      {jqlMode === "single" && supportsStackBy(selectedChartType) && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_STACK)}>Stack by field (optional)</Label>
+          <Select
+            {...stackField}
+            defaultValue={cfg[GRAPH_STACK] || ""}
+            isDisabled={stackLoading}
+            isLoading={stackLoading}
+            isSearchable
+            onInputChange={(value) => setStackQuery(normalizeSearchInput(value))}
+            options={stackOptions}
+            placeholder="Type to search Jira fields"
+          />
+          {stackError && <Text>{`Field search error: ${String(stackError)}`}</Text>}
+        </FormSection>
+      )}
+
+      {jqlMode === "single" && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_AGG)}>Aggregation</Label>
+          <Select {...aggregationField} defaultValue={cfg[GRAPH_AGG] || "count"} options={AGG_OPTIONS} />
+        </FormSection>
+      )}
 
       <FormFooter>
         <Button appearance="primary" type="submit">
