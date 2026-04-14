@@ -45,6 +45,11 @@ const findOptionLabel = (options, value) =>
 const normalizeSearchInput = (value) =>
   typeof value === "string" ? value : value?.target?.value || "";
 
+const SPECIAL_FIELD_OPTIONS = [
+  { label: "Project", value: "project" },
+  { label: "Status Category", value: "statuscategory" },
+];
+
 const buildFieldLabel = (value, resolvedFieldLabels) => {
   const normalizedValue = normalizeSelectValue(value);
 
@@ -52,8 +57,9 @@ const buildFieldLabel = (value, resolvedFieldLabels) => {
     return "None";
   }
 
-  if (normalizedValue === "statuscategory") {
-    return "Status Category";
+  const specialField = SPECIAL_FIELD_OPTIONS.find((option) => option.value === normalizedValue);
+  if (specialField) {
+    return specialField.label;
   }
 
   return normalizeSelectLabel(value) || resolvedFieldLabels[normalizedValue] || normalizedValue;
@@ -124,13 +130,14 @@ const Edit = () => {
       normalizeSelectLabel(selectedValue) || resolvedFieldLabels[selectedId] || selectedId;
 
     const seen = new Set(baseOptions.map((option) => option.value));
-    const options = [{ label: "Status Category", value: "statuscategory" }, ...baseOptions];
+    const options = [...SPECIAL_FIELD_OPTIONS, ...baseOptions];
 
     if (includeNone) {
       options.unshift({ label: "(None)", value: "" });
     }
 
-    if (selectedId && !seen.has(selectedId) && selectedId !== "statuscategory") {
+    const isSpecialField = SPECIAL_FIELD_OPTIONS.some((option) => option.value === selectedId);
+    if (selectedId && !seen.has(selectedId) && !isSpecialField) {
       options.push({ label: selectedLabel, value: selectedId });
     }
 

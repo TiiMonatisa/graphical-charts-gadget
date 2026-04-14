@@ -11,9 +11,16 @@ modules:
       edit:
         resource: main-resource
         render: native
+  consumer:
+    - key: report-jobs-consumer
+      queue: report-jobs-queue
+      function: report-job-consumer
   function:
     - key: resolver
       handler: index.handler
+    - key: report-job-consumer
+      handler: index.processReportJob
+      timeoutSeconds: 900
 resources:
   - key: main-resource
     path: src/frontend/index.jsx
@@ -26,3 +33,4 @@ app:
 permissions:
   scopes:
     - read:jira-work
+    - storage:app

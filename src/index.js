@@ -1,1 +1,1 @@
-export { handler } from './resolvers';
+export { handler, processReportJob } from './resolvers';
