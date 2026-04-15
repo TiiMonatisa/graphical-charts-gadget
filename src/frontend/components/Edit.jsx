@@ -33,7 +33,9 @@ import {
   GRAPH_MULTI_JQL,
   GRAPH_NAME,
   GRAPH_STACK,
+  GRAPH_TOP_COUNT,
   GRAPH_TYPE,
+  TOP_COUNT_OPTIONS,
 } from "../constants";
 import { parseMultiJqlInput } from "../../common/multiJql";
 
@@ -55,6 +57,11 @@ const buildBrowserLimitSummary = (cfg) => {
   const maxLabels = normalizeLimitInput(cfg[GRAPH_MAX_LABELS]) || String(DEFAULT_BROWSER_MAX_LABELS);
   const maxPoints = normalizeLimitInput(cfg[GRAPH_MAX_POINTS]) || String(DEFAULT_BROWSER_MAX_POINTS);
   return `Browser: ${maxLabels} labels / ${maxPoints} points`;
+};
+
+const buildTopCountSummary = (cfg) => {
+  const topCount = normalizeSelectValue(cfg[GRAPH_TOP_COUNT]);
+  return topCount ? `Top ${topCount} + Other` : "All categories";
 };
 
 const findBrowserLimitPreset = (maxLabels, maxPoints) =>
@@ -181,6 +188,7 @@ const Edit = () => {
   const groupField = register(GRAPH_GROUP, { required: true });
   const stackField = register(GRAPH_STACK);
   const aggregationField = register(GRAPH_AGG);
+  const topCountField = register(GRAPH_TOP_COUNT);
   const maxLabelsField = register(GRAPH_MAX_LABELS);
   const maxPointsField = register(GRAPH_MAX_POINTS);
 
@@ -313,7 +321,7 @@ const Edit = () => {
             )} | Aggregation: ${findOptionLabel(
               AGG_OPTIONS,
               normalizeSelectValue(cfg[GRAPH_AGG]) || "count"
-            )} | ${buildBrowserLimitSummary(cfg)}`}
+            )} | ${buildTopCountSummary(cfg)} | ${buildBrowserLimitSummary(cfg)}`}
           </Text>
         </SectionMessage>
       </FormSection>
@@ -430,6 +438,15 @@ Ready for QA => project = DEMO AND status = "Ready for QA"`}
           <Select {...aggregationField} defaultValue={cfg[GRAPH_AGG] || "count"} options={AGG_OPTIONS} />
         </FormSection>
       )}
+
+      <FormSection>
+        <Label labelFor={getFieldId(GRAPH_TOP_COUNT)}>Top categories (optional)</Label>
+        <Select {...topCountField} defaultValue={cfg[GRAPH_TOP_COUNT] || ""} options={TOP_COUNT_OPTIONS} />
+        <Text>
+          Limit the chart to the top 5, 10, or 15 labels. Any remaining labels are combined into one
+          Other bar.
+        </Text>
+      </FormSection>
 
       <FormSection>
         <Label labelFor="browser-optimization-preset">Browser optimization</Label>

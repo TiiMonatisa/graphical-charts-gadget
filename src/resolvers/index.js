@@ -9,7 +9,7 @@ const MAX_TOTAL = 100000;
 const MULTI_JQL_MAX_RESULTS = 1000;
 const MULTI_JQL_MAX_PAGES = 1000;
 const MATCHING_ISSUE_DISPLAY_LIMIT = 100;
-const JOB_VERSION = 1;
+const JOB_VERSION = 2;
 const PROCESSING_TIME_BUDGET_MS = 8000;
 const DEFAULT_MAX_BROWSER_LABELS = 120;
 const DEFAULT_MAX_BROWSER_POINTS = 800;
@@ -17,6 +17,8 @@ const MIN_MAX_BROWSER_LABELS = 10;
 const MAX_MAX_BROWSER_LABELS = 1000;
 const MIN_MAX_BROWSER_POINTS = 50;
 const MAX_MAX_BROWSER_POINTS = 5000;
+const ALLOWED_TOP_COUNT_LIMITS = new Set([5, 10, 15]);
+const OTHER_LABEL = "Other";
 
 const normalizeSelectValue = (value) =>
   value && typeof value === "object" && "value" in value ? value.value : value;
@@ -227,6 +229,17 @@ const parseIntegerWithinRange = (value, fallback, minimum, maximum) => {
   return Math.min(Math.max(parsed, minimum), maximum);
 };
 
+const parseOptionalTopCountLimit = (value) => {
+  const normalizedValue = normalizeSelectValue(value);
+  const parsed = Number(normalizedValue);
+
+  if (!Number.isInteger(parsed) || !ALLOWED_TOP_COUNT_LIMITS.has(parsed)) {
+    return null;
+  }
+
+  return parsed;
+};
+
 const toConfigSnapshot = (cfg = {}) => ({
   name: String(cfg["graph-name"] || ""),
   jql: decodeHtmlEntities(cfg["graph-jql"]).trim(),
@@ -235,6 +248,7 @@ const toConfigSnapshot = (cfg = {}) => ({
   groupFieldId: normalizeSelectValue(cfg["graph-group"]) || null,
   stackFieldId: normalizeSelectValue(cfg["graph-stack"]) || null,
   aggSpec: normalizeSelectValue(cfg["graph-agg"]) || "count",
+  topCountLimit: parseOptionalTopCountLimit(cfg["graph-top-count"]),
   maxBrowserLabels: parseIntegerWithinRange(
     cfg["graph-max-labels"],
     DEFAULT_MAX_BROWSER_LABELS,
@@ -396,6 +410,128 @@ const sortLabelsByTotalValue = (entries) =>
 
     return String(left.label).localeCompare(String(right.label));
   });
+
+const combineJqlExpressions = (expressions = []) => {
+  const uniqueExpressions = Array.from(
+    new Set(
+      expressions
+        .map((expression) => String(expression || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (uniqueExpressions.length === 0) {
+    return null;
+  }
+
+  if (uniqueExpressions.length === 1) {
+    return uniqueExpressions[0];
+  }
+
+  return uniqueExpressions.map((expression) => `(${expression})`).join(" OR ");
+};
+
+const applyTopCountLimit = (data, config) => {
+  const topCountLimit = config?.topCountLimit;
+
+  if (!topCountLimit || !Array.isArray(data) || data.length === 0) {
+    return {
+      data: Array.isArray(data) ? data : [],
+      topCountGrouping: null,
+    };
+  }
+
+  const labelStats = new Map();
+  for (const point of data) {
+    const label = point?.label || "Unspecified";
+    const current = labelStats.get(label) || {
+      label,
+      totalValue: 0,
+      points: [],
+    };
+
+    current.totalValue += Number(point?.value) || 0;
+    current.points.push(point);
+    labelStats.set(label, current);
+  }
+
+  if (labelStats.size <= topCountLimit) {
+    return {
+      data,
+      topCountGrouping: null,
+    };
+  }
+
+  const sortedLabels = sortLabelsByTotalValue(Array.from(labelStats.values()));
+  const keptLabels = sortedLabels.slice(0, topCountLimit);
+  const omittedLabels = sortedLabels.slice(topCountLimit);
+  const keptData = keptLabels.flatMap((entry) => entry.points);
+  const omittedPoints = omittedLabels.flatMap((entry) => entry.points);
+  const hasIndependentSeries = data.some(
+    (point) => point?.type && point.type !== point.label
+  );
+
+  if (omittedPoints.length === 0) {
+    return {
+      data,
+      topCountGrouping: null,
+    };
+  }
+
+  const otherGroupDrilldownJql = combineJqlExpressions(
+    omittedPoints.map((point) => point.groupDrilldownJql || point.drilldownJql)
+  );
+
+  const otherPoints = [];
+
+  if (hasIndependentSeries) {
+    const segmentMap = new Map();
+
+    for (const point of omittedPoints) {
+      const segmentKey = point?.type || OTHER_LABEL;
+      const current = segmentMap.get(segmentKey) || {
+        type: segmentKey,
+        value: 0,
+        drilldownJqls: [],
+      };
+
+      current.value += Number(point?.value) || 0;
+      current.drilldownJqls.push(point?.drilldownJql);
+      segmentMap.set(segmentKey, current);
+    }
+
+    for (const segment of segmentMap.values()) {
+      otherPoints.push({
+        type: segment.type,
+        label: OTHER_LABEL,
+        value: segment.value,
+        drilldownJql: combineJqlExpressions(segment.drilldownJqls),
+        groupDrilldownJql:
+          otherGroupDrilldownJql || combineJqlExpressions(segment.drilldownJqls),
+      });
+    }
+  } else {
+    otherPoints.push({
+      type: OTHER_LABEL,
+      label: OTHER_LABEL,
+      value: omittedPoints.reduce((sum, point) => sum + (Number(point?.value) || 0), 0),
+      drilldownJql: combineJqlExpressions(omittedPoints.map((point) => point?.drilldownJql)),
+      groupDrilldownJql:
+        otherGroupDrilldownJql ||
+        combineJqlExpressions(omittedPoints.map((point) => point?.drilldownJql)),
+    });
+  }
+
+  return {
+    data: [...keptData, ...otherPoints],
+    topCountGrouping: {
+      applied: true,
+      limit: topCountLimit,
+      groupedLabelCount: omittedLabels.length,
+      otherLabel: OTHER_LABEL,
+    },
+  };
+};
 
 const buildBrowserOptimizedDataset = (data, config) => {
   const maxLabels = config?.maxBrowserLabels || DEFAULT_MAX_BROWSER_LABELS;
@@ -574,6 +710,18 @@ const initializeMultiPartial = (config) => {
 const initializeJobPartial = (config) =>
   config.multi ? initializeMultiPartial(config) : initializeSinglePartial(config);
 
+const getProcessedIssueCount = (partial) => {
+  if (partial.mode === "multi-jql") {
+    const completedCount = partial.results.reduce(
+      (sum, entry) => sum + (Number(entry?.value) || 0),
+      0
+    );
+    return completedCount + partial.currentItemTotal;
+  }
+
+  return partial.fetched;
+};
+
 const finalizeSingleResult = (config, partial) => {
   const chartData = [];
 
@@ -601,7 +749,8 @@ const finalizeSingleResult = (config, partial) => {
     }
   }
 
-  const { data, browserOptimization } = buildBrowserOptimizedDataset(chartData, config);
+  const { data: groupedData, topCountGrouping } = applyTopCountLimit(chartData, config);
+  const { data, browserOptimization } = buildBrowserOptimizedDataset(groupedData, config);
 
   return {
     title: config.name,
@@ -619,10 +768,14 @@ const finalizeSingleResult = (config, partial) => {
       fieldsRequested: partial.fields,
       matchingIssueCount: partial.fetched,
       matchingIssues: [],
+      topCountGrouping,
       browserOptimization,
       notes: [
         "Data is shaped for Forge UI Kit chart components.",
         "Each rendered segment includes a drilldown JQL derived from the selected bucket values.",
+        topCountGrouping?.applied
+          ? `Only the top ${topCountGrouping.limit} labels are shown individually. Remaining labels are combined into ${topCountGrouping.otherLabel}.`
+          : null,
         browserOptimization?.applied
           ? `Only the top ${browserOptimization.maxLabels} labels and ${browserOptimization.maxPoints} points are sent to the browser to keep dashboard memory usage predictable.`
           : null,
@@ -635,7 +788,8 @@ const finalizeSingleResult = (config, partial) => {
 };
 
 const finalizeMultiResult = (config, partial) => {
-  const { data, browserOptimization } = buildBrowserOptimizedDataset(partial.results, config);
+  const { data: groupedData, topCountGrouping } = applyTopCountLimit(partial.results, config);
+  const { data, browserOptimization } = buildBrowserOptimizedDataset(groupedData, config);
 
   return {
     title: config.name,
@@ -648,10 +802,14 @@ const finalizeMultiResult = (config, partial) => {
     meta: {
       mode: "multi-jql",
       jqls: partial.items.map((item) => ({ label: item.label, jql: item.jql })),
+      topCountGrouping,
       browserOptimization,
       notes: [
         "Totals are calculated per Multi JQL line.",
         "Each segment now includes a drilldown JQL that can be opened below the chart.",
+        topCountGrouping?.applied
+          ? `Only the top ${topCountGrouping.limit} labels are shown individually. Remaining labels are combined into ${topCountGrouping.otherLabel}.`
+          : null,
         browserOptimization?.applied
           ? `Only the top ${browserOptimization.maxLabels} labels and ${browserOptimization.maxPoints} points are sent to the browser to keep dashboard memory usage predictable.`
           : null,
@@ -668,8 +826,9 @@ const buildProgress = (partial) => {
       stage: currentItem ? "Fetching Multi JQL results" : "Complete",
       current: currentItem ? partial.itemIndex + 1 : partial.items.length,
       total: partial.items.length,
+      processedIssues: getProcessedIssueCount(partial),
       detail: currentItem
-        ? `${currentItem.label} • page ${partial.currentItemPage || 1}`
+        ? `${currentItem.label} - page ${partial.currentItemPage || 1}`
         : "Report data is ready.",
     };
   }
@@ -678,7 +837,8 @@ const buildProgress = (partial) => {
     stage: "Fetching Jira issues",
     current: partial.fetched,
     total: partial.total,
-    detail: `Page ${partial.page || 1} • ${partial.fetched} issues processed`,
+    processedIssues: getProcessedIssueCount(partial),
+    detail: `Page ${partial.page || 1} - ${partial.fetched} issues processed`,
   };
 };
 
@@ -880,6 +1040,7 @@ const advanceReportJob = async ({ installationKey, fingerprint, configSnapshot, 
       stage: "Complete",
       current: 1,
       total: 1,
+      processedIssues: getProcessedIssueCount(partial),
       detail: "Report data is ready.",
     },
     error: null,
