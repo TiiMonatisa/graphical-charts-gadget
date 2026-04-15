@@ -12,6 +12,14 @@ export const GRAPH_GROUP = "graph-group";
 export const GRAPH_AGG = "graph-agg";
 // Optional: support stacked charts by a second field
 export const GRAPH_STACK = "graph-stack";
+// Optional: let each gadget tune how much chart data is sent to the browser.
+export const GRAPH_MAX_LABELS = "graph-max-labels";
+export const GRAPH_MAX_POINTS = "graph-max-points";
+
+// Safe defaults that keep the dashboard responsive unless the user explicitly
+// chooses a different tradeoff for one specific gadget.
+export const DEFAULT_BROWSER_MAX_LABELS = 120;
+export const DEFAULT_BROWSER_MAX_POINTS = 800;
 
 // Available chart types as displayed in the configuration Select
 export const CHART_OPTIONS = [

@@ -11,6 +11,12 @@ const MULTI_JQL_MAX_PAGES = 1000;
 const MATCHING_ISSUE_DISPLAY_LIMIT = 100;
 const JOB_VERSION = 1;
 const PROCESSING_TIME_BUDGET_MS = 8000;
+const DEFAULT_MAX_BROWSER_LABELS = 120;
+const DEFAULT_MAX_BROWSER_POINTS = 800;
+const MIN_MAX_BROWSER_LABELS = 10;
+const MAX_MAX_BROWSER_LABELS = 1000;
+const MIN_MAX_BROWSER_POINTS = 50;
+const MAX_MAX_BROWSER_POINTS = 5000;
 
 const normalizeSelectValue = (value) =>
   value && typeof value === "object" && "value" in value ? value.value : value;
@@ -199,14 +205,48 @@ const stableStringify = (value) => {
   return JSON.stringify(value);
 };
 
+const decodeHtmlEntities = (value) =>
+  String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+
+const parseIntegerWithinRange = (value, fallback, minimum, maximum) => {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(parsed, minimum), maximum);
+};
+
 const toConfigSnapshot = (cfg = {}) => ({
   name: String(cfg["graph-name"] || ""),
-  jql: String(cfg["graph-jql"] || "").trim(),
-  multi: String(cfg["graph-multi-jql"] || "").trim(),
+  jql: decodeHtmlEntities(cfg["graph-jql"]).trim(),
+  multi: decodeHtmlEntities(cfg["graph-multi-jql"]).trim(),
   chartType: normalizeSelectValue(cfg["graph-type"]) || "bar",
   groupFieldId: normalizeSelectValue(cfg["graph-group"]) || null,
   stackFieldId: normalizeSelectValue(cfg["graph-stack"]) || null,
   aggSpec: normalizeSelectValue(cfg["graph-agg"]) || "count",
+  maxBrowserLabels: parseIntegerWithinRange(
+    cfg["graph-max-labels"],
+    DEFAULT_MAX_BROWSER_LABELS,
+    MIN_MAX_BROWSER_LABELS,
+    MAX_MAX_BROWSER_LABELS
+  ),
+  maxBrowserPoints: parseIntegerWithinRange(
+    cfg["graph-max-points"],
+    DEFAULT_MAX_BROWSER_POINTS,
+    MIN_MAX_BROWSER_POINTS,
+    MAX_MAX_BROWSER_POINTS
+  ),
 });
 
 const hashString = (input) => {
@@ -348,6 +388,114 @@ const createStackBucket = () => ({
   stackClauses: [],
 });
 
+const sortLabelsByTotalValue = (entries) =>
+  entries.sort((left, right) => {
+    if (right.totalValue !== left.totalValue) {
+      return right.totalValue - left.totalValue;
+    }
+
+    return String(left.label).localeCompare(String(right.label));
+  });
+
+const buildBrowserOptimizedDataset = (data, config) => {
+  const maxLabels = config?.maxBrowserLabels || DEFAULT_MAX_BROWSER_LABELS;
+  const maxPoints = config?.maxBrowserPoints || DEFAULT_MAX_BROWSER_POINTS;
+
+  if (!Array.isArray(data) || data.length === 0) {
+    return {
+      data: Array.isArray(data) ? data : [],
+      browserOptimization: null,
+    };
+  }
+
+  // The dashboard iframe is small, and very large high-cardinality charts create
+  // a poor user experience while also consuming a lot of browser memory. We keep
+  // the most meaningful labels server-side so the client never needs to allocate
+  // thousands of chart points, filter options, and drilldown rows at once.
+  const labelStats = new Map();
+
+  for (const point of data) {
+    const label = point?.label || "Unspecified";
+    const current = labelStats.get(label) || {
+      label,
+      totalValue: 0,
+      pointCount: 0,
+    };
+
+    current.totalValue += Number(point?.value) || 0;
+    current.pointCount += 1;
+    labelStats.set(label, current);
+  }
+
+  if (labelStats.size <= maxLabels && data.length <= maxPoints) {
+    return {
+      data,
+      browserOptimization: null,
+    };
+  }
+
+  const sortedLabels = sortLabelsByTotalValue(Array.from(labelStats.values()));
+  const keptLabels = new Set();
+  let keptPointCount = 0;
+
+  for (const entry of sortedLabels) {
+    if (keptLabels.size >= maxLabels) {
+      break;
+    }
+
+    const nextPointCount = keptPointCount + entry.pointCount;
+    if (keptLabels.size > 0 && nextPointCount > maxPoints) {
+      break;
+    }
+
+    keptLabels.add(entry.label);
+    keptPointCount = nextPointCount;
+  }
+
+  const labelTrimmedData = data.filter((point) => keptLabels.has(point?.label || "Unspecified"));
+
+  let trimmedData = labelTrimmedData;
+  if (labelTrimmedData.length > maxPoints) {
+    const rankedPoints = labelTrimmedData
+      .map((point, index) => ({
+        index,
+        weight: Number(point?.value) || 0,
+      }))
+      .sort((left, right) => {
+        if (right.weight !== left.weight) {
+          return right.weight - left.weight;
+        }
+
+        return left.index - right.index;
+      });
+
+    const keptIndexes = new Set(
+      rankedPoints.slice(0, maxPoints).map((entry) => entry.index)
+    );
+
+    trimmedData = labelTrimmedData.filter((point, index) => keptIndexes.has(index));
+  }
+
+  const renderedLabelCount = new Set(
+    trimmedData.map((point) => point?.label || "Unspecified")
+  ).size;
+
+  return {
+    data: trimmedData,
+    browserOptimization: {
+      applied: true,
+      maxLabels,
+      maxPoints,
+      originalLabelCount: labelStats.size,
+      originalPointCount: data.length,
+      renderedLabelCount,
+      renderedPointCount: trimmedData.length,
+      omittedLabelCount: Math.max(labelStats.size - renderedLabelCount, 0),
+      omittedPointCount: Math.max(data.length - trimmedData.length, 0),
+    },
+  };
+};
+
 const applyMetricToBucket = (bucket, agg, metricValue) => {
   bucket.count += 1;
 
@@ -427,11 +575,11 @@ const initializeJobPartial = (config) =>
   config.multi ? initializeMultiPartial(config) : initializeSinglePartial(config);
 
 const finalizeSingleResult = (config, partial) => {
-  const data = [];
+  const chartData = [];
 
   if (!config.stackFieldId) {
     for (const [label, bucket] of Object.entries(partial.buckets)) {
-      data.push({
+      chartData.push({
         type: label,
         label,
         value: getBucketValue(bucket, partial.agg),
@@ -442,7 +590,7 @@ const finalizeSingleResult = (config, partial) => {
   } else {
     for (const [label, stackBuckets] of Object.entries(partial.buckets)) {
       for (const [stackLabel, bucket] of Object.entries(stackBuckets)) {
-        data.push({
+        chartData.push({
           type: stackLabel,
           label,
           value: getBucketValue(bucket, partial.agg),
@@ -452,6 +600,8 @@ const finalizeSingleResult = (config, partial) => {
       }
     }
   }
+
+  const { data, browserOptimization } = buildBrowserOptimizedDataset(chartData, config);
 
   return {
     title: config.name,
@@ -469,9 +619,13 @@ const finalizeSingleResult = (config, partial) => {
       fieldsRequested: partial.fields,
       matchingIssueCount: partial.fetched,
       matchingIssues: [],
+      browserOptimization,
       notes: [
         "Data is shaped for Forge UI Kit chart components.",
         "Each rendered segment includes a drilldown JQL derived from the selected bucket values.",
+        browserOptimization?.applied
+          ? `Only the top ${browserOptimization.maxLabels} labels and ${browserOptimization.maxPoints} points are sent to the browser to keep dashboard memory usage predictable.`
+          : null,
         partial.fetched >= MAX_TOTAL
           ? `Processing stopped after ${MAX_TOTAL} issues to protect dashboard performance.`
           : null,
@@ -480,23 +634,31 @@ const finalizeSingleResult = (config, partial) => {
   };
 };
 
-const finalizeMultiResult = (config, partial) => ({
-  title: config.name,
-  chartType: config.chartType || "pie",
-  groupBy: null,
-  stackBy: null,
-  aggregation: "count",
-  data: partial.results,
-  accessors: buildAccessors(),
-  meta: {
-    mode: "multi-jql",
-    jqls: partial.items.map((item) => ({ label: item.label, jql: item.jql })),
-    notes: [
-      "Totals are calculated per Multi JQL line.",
-      "Each segment now includes a drilldown JQL that can be opened below the chart.",
-    ],
-  },
-});
+const finalizeMultiResult = (config, partial) => {
+  const { data, browserOptimization } = buildBrowserOptimizedDataset(partial.results, config);
+
+  return {
+    title: config.name,
+    chartType: config.chartType || "pie",
+    groupBy: null,
+    stackBy: null,
+    aggregation: "count",
+    data,
+    accessors: buildAccessors(),
+    meta: {
+      mode: "multi-jql",
+      jqls: partial.items.map((item) => ({ label: item.label, jql: item.jql })),
+      browserOptimization,
+      notes: [
+        "Totals are calculated per Multi JQL line.",
+        "Each segment now includes a drilldown JQL that can be opened below the chart.",
+        browserOptimization?.applied
+          ? `Only the top ${browserOptimization.maxLabels} labels and ${browserOptimization.maxPoints} points are sent to the browser to keep dashboard memory usage predictable.`
+          : null,
+      ].filter(Boolean),
+    },
+  };
+};
 
 const buildProgress = (partial) => {
   if (partial.mode === "multi-jql") {

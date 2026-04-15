@@ -23,9 +23,13 @@ import { requestJira, view } from "@forge/bridge";
 import {
   AGG_OPTIONS,
   CHART_OPTIONS,
+  DEFAULT_BROWSER_MAX_LABELS,
+  DEFAULT_BROWSER_MAX_POINTS,
   GRAPH_AGG,
   GRAPH_GROUP,
   GRAPH_JQL,
+  GRAPH_MAX_LABELS,
+  GRAPH_MAX_POINTS,
   GRAPH_MULTI_JQL,
   GRAPH_NAME,
   GRAPH_STACK,
@@ -44,6 +48,30 @@ const findOptionLabel = (options, value) =>
 
 const normalizeSearchInput = (value) =>
   typeof value === "string" ? value : value?.target?.value || "";
+
+const normalizeLimitInput = (value) => String(value || "").trim();
+
+const buildBrowserLimitSummary = (cfg) => {
+  const maxLabels = normalizeLimitInput(cfg[GRAPH_MAX_LABELS]) || String(DEFAULT_BROWSER_MAX_LABELS);
+  const maxPoints = normalizeLimitInput(cfg[GRAPH_MAX_POINTS]) || String(DEFAULT_BROWSER_MAX_POINTS);
+  return `Browser: ${maxLabels} labels / ${maxPoints} points`;
+};
+
+const findBrowserLimitPreset = (maxLabels, maxPoints) =>
+  BROWSER_LIMIT_PRESETS.find(
+    (preset) => preset.maxLabels === maxLabels && preset.maxPoints === maxPoints
+  );
+
+const getInitialBrowserPreset = (cfg) => {
+  const maxLabels = Number(
+    normalizeLimitInput(cfg[GRAPH_MAX_LABELS]) || DEFAULT_BROWSER_MAX_LABELS
+  );
+  const maxPoints = Number(
+    normalizeLimitInput(cfg[GRAPH_MAX_POINTS]) || DEFAULT_BROWSER_MAX_POINTS
+  );
+
+  return findBrowserLimitPreset(maxLabels, maxPoints)?.key || "custom";
+};
 
 const SPECIAL_FIELD_OPTIONS = [
   { label: "Project", value: "project" },
@@ -68,6 +96,37 @@ const buildFieldLabel = (value, resolvedFieldLabels) => {
 const JQL_MODE_OPTIONS = [
   { label: "Single JQL", value: "single" },
   { label: "Multi JQL", value: "multi" },
+];
+
+const BROWSER_LIMIT_PRESETS = [
+  {
+    key: "lean",
+    label: "Lean",
+    maxLabels: 40,
+    maxPoints: 200,
+    description: "Lowest browser memory use. Best for very large searches.",
+  },
+  {
+    key: "balanced",
+    label: "Balanced",
+    maxLabels: DEFAULT_BROWSER_MAX_LABELS,
+    maxPoints: DEFAULT_BROWSER_MAX_POINTS,
+    description: "Default tradeoff between chart detail and dashboard responsiveness.",
+  },
+  {
+    key: "detailed",
+    label: "Detailed",
+    maxLabels: 240,
+    maxPoints: 1600,
+    description: "Shows more categories, but uses more browser memory.",
+  },
+  {
+    key: "custom",
+    label: "Custom",
+    maxLabels: null,
+    maxPoints: null,
+    description: "Manually choose the browser label and point limits for this gadget.",
+  },
 ];
 
 const STACK_ENABLED_CHART_TYPES = new Set(["stack-bar", "horizontal-stack-bar"]);
@@ -113,6 +172,7 @@ const Edit = () => {
     String(cfg[GRAPH_MULTI_JQL] || "").trim() ? "multi" : "single"
   );
   const [selectedChartType, setSelectedChartType] = useState(initialChartType);
+  const [selectedBrowserPreset, setSelectedBrowserPreset] = useState(getInitialBrowserPreset(cfg));
 
   const titleField = register(GRAPH_NAME, { required: true });
   const chartTypeField = register(GRAPH_TYPE);
@@ -121,8 +181,14 @@ const Edit = () => {
   const groupField = register(GRAPH_GROUP, { required: true });
   const stackField = register(GRAPH_STACK);
   const aggregationField = register(GRAPH_AGG);
+  const maxLabelsField = register(GRAPH_MAX_LABELS);
+  const maxPointsField = register(GRAPH_MAX_POINTS);
 
   const multiEntries = parseMultiJqlInput(multiJqlDraft);
+  const activeBrowserPreset =
+    BROWSER_LIMIT_PRESETS.find((preset) => preset.key === selectedBrowserPreset) ||
+    BROWSER_LIMIT_PRESETS[1];
+  const isCustomBrowserPreset = selectedBrowserPreset === "custom";
 
   const withSpecialAndSelected = (baseOptions, selectedValue, includeNone) => {
     const selectedId = normalizeSelectValue(selectedValue);
@@ -216,6 +282,12 @@ const Edit = () => {
       [GRAPH_STACK]: supportsStackBy(selectedChartType) && jqlMode === "single"
         ? formData[GRAPH_STACK] || ""
         : "",
+      [GRAPH_MAX_LABELS]: isCustomBrowserPreset
+        ? normalizeLimitInput(formData[GRAPH_MAX_LABELS])
+        : String(activeBrowserPreset.maxLabels),
+      [GRAPH_MAX_POINTS]: isCustomBrowserPreset
+        ? normalizeLimitInput(formData[GRAPH_MAX_POINTS])
+        : String(activeBrowserPreset.maxPoints),
     };
 
     await view.submit(nextFormData);
@@ -241,7 +313,7 @@ const Edit = () => {
             )} | Aggregation: ${findOptionLabel(
               AGG_OPTIONS,
               normalizeSelectValue(cfg[GRAPH_AGG]) || "count"
-            )}`}
+            )} | ${buildBrowserLimitSummary(cfg)}`}
           </Text>
         </SectionMessage>
       </FormSection>
@@ -356,6 +428,52 @@ Ready for QA => project = DEMO AND status = "Ready for QA"`}
         <FormSection>
           <Label labelFor={getFieldId(GRAPH_AGG)}>Aggregation</Label>
           <Select {...aggregationField} defaultValue={cfg[GRAPH_AGG] || "count"} options={AGG_OPTIONS} />
+        </FormSection>
+      )}
+
+      <FormSection>
+        <Label labelFor="browser-optimization-preset">Browser optimization</Label>
+        <ButtonGroup>
+          {BROWSER_LIMIT_PRESETS.map((preset) => (
+            <Button
+              appearance={selectedBrowserPreset === preset.key ? "primary" : "default"}
+              key={preset.key}
+              onClick={() => setSelectedBrowserPreset(preset.key)}
+              type="button"
+            >
+              {preset.label}
+            </Button>
+          ))}
+        </ButtonGroup>
+        <Text>{activeBrowserPreset.description}</Text>
+        {!isCustomBrowserPreset && (
+          <Text>
+            {`This preset will send up to ${activeBrowserPreset.maxLabels} labels and ${activeBrowserPreset.maxPoints} chart points to the browser.`}
+          </Text>
+        )}
+      </FormSection>
+
+      {isCustomBrowserPreset && (
+        <FormSection>
+          <Label labelFor={getFieldId(GRAPH_MAX_LABELS)}>Custom browser label limit</Label>
+          <Textfield
+            {...maxLabelsField}
+            defaultValue={cfg[GRAPH_MAX_LABELS] || ""}
+            placeholder={String(DEFAULT_BROWSER_MAX_LABELS)}
+          />
+          <Text>
+            {`Maximum chart labels sent to the browser for this gadget. Leave blank to use ${DEFAULT_BROWSER_MAX_LABELS}.`}
+          </Text>
+
+          <Label labelFor={getFieldId(GRAPH_MAX_POINTS)}>Custom browser point limit</Label>
+          <Textfield
+            {...maxPointsField}
+            defaultValue={cfg[GRAPH_MAX_POINTS] || ""}
+            placeholder={String(DEFAULT_BROWSER_MAX_POINTS)}
+          />
+          <Text>
+            {`Maximum chart points sent to the browser for this gadget. Leave blank to use ${DEFAULT_BROWSER_MAX_POINTS}.`}
+          </Text>
         </FormSection>
       )}
 

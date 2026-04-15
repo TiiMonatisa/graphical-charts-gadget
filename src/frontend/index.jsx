@@ -16,8 +16,6 @@ const App = () => {
 };
 
 ForgeReconciler.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+  <App />
 );
 

@@ -44,6 +44,18 @@ const formatTimestamp = (value) => {
   return date.toLocaleString();
 };
 
+const buildBrowserOptimizationText = (browserOptimization) => {
+  if (!browserOptimization?.applied) {
+    return null;
+  }
+
+  return `Browser optimization is active. Showing ${String(
+    browserOptimization.renderedLabelCount
+  )} of ${String(browserOptimization.originalLabelCount)} labels and ${String(
+    browserOptimization.renderedPointCount
+  )} of ${String(browserOptimization.originalPointCount)} chart points.`;
+};
+
 const View = () => {
   const [job, setJob] = useState(null);
   const [requestError, setRequestError] = useState(null);
@@ -106,8 +118,9 @@ const View = () => {
   const data = job?.result || null;
   const isError = Boolean(requestError) || job?.state === "failed" || job?.state === "invalid-config";
   const errorPayload = requestError ? { error: requestError } : job?.error || null;
-  const result = data ? buildResult(data) : null;
+  const result = useMemo(() => (data ? buildResult(data) : null), [data]);
   const reportMeta = result?.meta || null;
+  const browserOptimizationText = buildBrowserOptimizationText(reportMeta?.browserOptimization);
 
   const labelOptions = useMemo(() => {
     if (!result?.data) {
@@ -140,22 +153,27 @@ const View = () => {
     setSelectedSeries((current) => current.filter((option) => validSeries.has(option.value)));
   }, [labelOptions, seriesOptions]);
 
-  const selectedLabelValues = optionValueSet(selectedLabels);
-  const selectedSeriesValues = optionValueSet(selectedSeries);
+  const selectedLabelValues = useMemo(() => optionValueSet(selectedLabels), [selectedLabels]);
+  const selectedSeriesValues = useMemo(() => optionValueSet(selectedSeries), [selectedSeries]);
 
-  const filteredResult =
-    result && result.data
-      ? {
-          ...result,
-          data: result.data.filter((entry) => {
-            const keepLabel =
-              selectedLabelValues.size === 0 || selectedLabelValues.has(entry.label);
-            const keepSeries =
-              selectedSeriesValues.size === 0 || selectedSeriesValues.has(entry.type);
-            return keepLabel && keepSeries;
-          }),
-        }
-      : result;
+  const filteredResult = useMemo(() => {
+    if (!result?.data) {
+      return result;
+    }
+
+    if (selectedLabelValues.size === 0 && selectedSeriesValues.size === 0) {
+      return result;
+    }
+
+    return {
+      ...result,
+      data: result.data.filter((entry) => {
+        const keepLabel = selectedLabelValues.size === 0 || selectedLabelValues.has(entry.label);
+        const keepSeries = selectedSeriesValues.size === 0 || selectedSeriesValues.has(entry.type);
+        return keepLabel && keepSeries;
+      }),
+    };
+  }, [result, selectedLabelValues, selectedSeriesValues]);
 
   const hasActiveFilter = selectedLabels.length > 0 || selectedSeries.length > 0;
   const isWorking = isLoading || ACTIVE_JOB_STATES.has(job?.state);
@@ -229,6 +247,7 @@ const View = () => {
                 {reportMeta?.totalIssuesInspected != null && (
                   <Text>Issues inspected while building the report: {String(reportMeta.totalIssuesInspected)}</Text>
                 )}
+                {browserOptimizationText && <Text>{browserOptimizationText}</Text>}
                 {Array.isArray(reportMeta?.notes) &&
                   reportMeta.notes.filter(Boolean).map((note) => <Text key={note}>{String(note)}</Text>)}
               </Stack>

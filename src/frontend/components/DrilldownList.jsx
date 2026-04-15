@@ -3,7 +3,7 @@
 // reveal the smaller segment links beside it so the user can drill into either
 // the total or one specific slice of the bar.
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Button, Inline, Link, Stack, Text, xcss } from "@forge/react";
 
 const WHOLE_BAR_STYLES = xcss({
@@ -102,13 +102,21 @@ const hasVisibleSegments = (segments) =>
 
 const DrilldownList = ({ data }) => {
   const [isExpanded, setIsExpanded] = useState(false);
-  const drilldowns = Array.isArray(data) ? data.filter((point) => point?.drilldownJql) : [];
+  const drilldowns = useMemo(
+    () => (Array.isArray(data) ? data.filter((point) => point?.drilldownJql) : []),
+    [data]
+  );
+  // Grouping every point into drilldown rows is only useful once the user opens
+  // the section. Deferring that work keeps the default view lighter, which helps
+  // when several dashboard gadgets are open at the same time.
+  const groups = useMemo(
+    () => (isExpanded ? groupPointsByLabel(drilldowns) : []),
+    [drilldowns, isExpanded]
+  );
 
   if (drilldowns.length === 0) {
     return null;
   }
-
-  const groups = groupPointsByLabel(drilldowns);
 
   return (
     <Box xcss={sectionStyles}>
