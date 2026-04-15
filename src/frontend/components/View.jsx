@@ -1,14 +1,14 @@
 // View component for rendering the chart. It starts or resumes a report job,
-// polls lightweight job status from the resolver, and only renders chart data
-// once the incremental report build has finished.
+// keeps the last completed result on screen during refreshes, and shows a
+// progress bar while the resolver incrementally rebuilds the report.
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Button,
   Inline,
+  ProgressBar,
   SectionMessage,
   Select,
-  Spinner,
   Stack,
   Text,
   useProductContext,
@@ -31,29 +31,12 @@ const toMultiValue = (value) => {
 
 const optionValueSet = (options) => new Set(options.map((option) => option.value));
 
-const formatTimestamp = (value) => {
-  if (!value) {
+const clampProgressValue = (current, total) => {
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) {
     return null;
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return date.toLocaleString();
-};
-
-const buildBrowserOptimizationText = (browserOptimization) => {
-  if (!browserOptimization?.applied) {
-    return null;
-  }
-
-  return `Browser optimization is active. Showing ${String(
-    browserOptimization.renderedLabelCount
-  )} of ${String(browserOptimization.originalLabelCount)} labels and ${String(
-    browserOptimization.renderedPointCount
-  )} of ${String(browserOptimization.originalPointCount)} chart points.`;
+  return Math.min(Math.max(current / total, 0), 1);
 };
 
 const View = () => {
@@ -63,7 +46,10 @@ const View = () => {
   const [selectedLabels, setSelectedLabels] = useState([]);
   const [selectedSeries, setSelectedSeries] = useState([]);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [cachedResult, setCachedResult] = useState(null);
   const context = useProductContext();
+  const gadgetConfiguration = context?.extension?.gadgetConfiguration || {};
+  const configurationKey = useMemo(() => JSON.stringify(gadgetConfiguration), [gadgetConfiguration]);
 
   useEffect(() => {
     if (!context) {
@@ -113,14 +99,26 @@ const View = () => {
     };
   }, [context, refreshToken]);
 
-  const gadgetConfiguration = context?.extension?.gadgetConfiguration || {};
+  useEffect(() => {
+    // A saved gadget config change means this is effectively a new report
+    // definition, so the previous chart filters and cached render should reset.
+    setCachedResult(null);
+    setSelectedLabels([]);
+    setSelectedSeries([]);
+  }, [configurationKey]);
+
   const chartType = gadgetConfiguration[GRAPH_TYPE]?.value || gadgetConfiguration[GRAPH_TYPE];
-  const data = job?.result || null;
+  const liveResult = useMemo(() => (job?.result ? buildResult(job.result) : null), [job?.result]);
   const isError = Boolean(requestError) || job?.state === "failed" || job?.state === "invalid-config";
   const errorPayload = requestError ? { error: requestError } : job?.error || null;
-  const result = useMemo(() => (data ? buildResult(data) : null), [data]);
-  const reportMeta = result?.meta || null;
-  const browserOptimizationText = buildBrowserOptimizationText(reportMeta?.browserOptimization);
+
+  useEffect(() => {
+    if (liveResult) {
+      setCachedResult(liveResult);
+    }
+  }, [liveResult]);
+
+  const result = liveResult || cachedResult;
 
   const labelOptions = useMemo(() => {
     if (!result?.data) {
@@ -177,8 +175,9 @@ const View = () => {
 
   const hasActiveFilter = selectedLabels.length > 0 || selectedSeries.length > 0;
   const isWorking = isLoading || ACTIVE_JOB_STATES.has(job?.state);
-  const lastUpdatedText = formatTimestamp(job?.updatedAt);
-  const completedAtText = formatTimestamp(job?.completedAt);
+  const processedIssues = Number(job?.progress?.processedIssues);
+  const progressValue = clampProgressValue(Number(job?.progress?.current), Number(job?.progress?.total));
+  const hasProgressValue = progressValue != null;
 
   if (!context) {
     return "Loading...";
@@ -190,29 +189,21 @@ const View = () => {
         <Button appearance="primary" onClick={() => setRefreshToken((current) => current + 1)}>
           Refresh report
         </Button>
-        {job?.state && <Text>Status: {String(job.state)}</Text>}
-        {lastUpdatedText && <Text>Updated: {lastUpdatedText}</Text>}
+        {isWorking && <Text>{job?.progress?.stage || "Building report"}</Text>}
       </Inline>
 
       {isWorking && (
         <SectionMessage appearance="information" title="Building report">
           <Stack space="space.050">
-            <Inline space="space.100">
-              <Spinner size="small" />
-              <Text>
-                {isLoading ? "Running the Jira search and preparing chart data." : job?.progress?.stage || "Processing"}
-                {!isLoading && job?.progress?.detail ? ` — ${job.progress.detail}` : ""}
-              </Text>
-            </Inline>
-            {!isLoading && job?.progress?.current != null && (
-              <Text>
-                Progress: {String(job.progress.current)}
-                {job?.progress?.total != null ? ` / ${String(job.progress.total)}` : ""}
-              </Text>
+            <Text>{isLoading ? "Starting the Jira search." : job?.progress?.detail || "Processing report data."}</Text>
+            <ProgressBar
+              ariaLabel="Report generation progress"
+              isIndeterminate={!hasProgressValue}
+              value={hasProgressValue ? progressValue : undefined}
+            />
+            {Number.isFinite(processedIssues) && (
+              <Text>{`${processedIssues.toLocaleString()} issues processed`}</Text>
             )}
-            <Text>
-              The gadget is computing the report in the resolver and will render the chart as soon as the data is ready.
-            </Text>
           </Stack>
         </SectionMessage>
       )}
@@ -230,30 +221,6 @@ const View = () => {
 
       {result && (
         <Stack space="space.100">
-          {completedAtText && (
-            <Text>
-              Showing cached results from {completedAtText}. Use Refresh report to run the report again.
-            </Text>
-          )}
-
-          {(reportMeta?.matchingIssueCount != null ||
-            reportMeta?.totalIssuesInspected != null ||
-            (Array.isArray(reportMeta?.notes) && reportMeta.notes.length > 0)) && (
-            <SectionMessage appearance="information" title="Report details">
-              <Stack space="space.050">
-                {reportMeta?.matchingIssueCount != null && (
-                  <Text>Matching issues included in this report: {String(reportMeta.matchingIssueCount)}</Text>
-                )}
-                {reportMeta?.totalIssuesInspected != null && (
-                  <Text>Issues inspected while building the report: {String(reportMeta.totalIssuesInspected)}</Text>
-                )}
-                {browserOptimizationText && <Text>{browserOptimizationText}</Text>}
-                {Array.isArray(reportMeta?.notes) &&
-                  reportMeta.notes.filter(Boolean).map((note) => <Text key={note}>{String(note)}</Text>)}
-              </Stack>
-            </SectionMessage>
-          )}
-
           <Inline space="space.100">
             <Select
               isMulti
